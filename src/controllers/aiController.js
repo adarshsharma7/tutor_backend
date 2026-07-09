@@ -16,6 +16,7 @@ import LectureSummary from '../models/LectureSummary.js';
 // import GeneratedReport from '../models/GeneratedReport.js';
 import mongoose from 'mongoose';
 import { Exam, ExamAttempt } from '../models/Exam.js';
+import { AUDIENCE_SCOPES, normalizeAudienceInput, validateAudience } from '../utils/audience.js';
 
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
 
@@ -6362,6 +6363,8 @@ export const generateAICourse = async (req, res) => {
             sections = {},
             categoryId,        // ← tutor must pass this
             price = 0,
+            language = 'English',
+            audience
         } = req.body;
 
         if (!topic?.trim()) return res.status(400).json({ success: false, message: 'Course topic is required' });
@@ -6467,6 +6470,33 @@ Rules:
         const user = await User.findById(req.user._id).select('instituteId').lean();
         const instituteId = user?.instituteId || tutor.instituteId || null;
 
+        let resolvedAudience;
+        if (audience) {
+            const normalized = normalizeAudienceInput({
+                audience,
+                scope: audience.scope,
+                instituteId: audience.instituteId || instituteId,
+            }, {
+                defaultScope: instituteId ? AUDIENCE_SCOPES.INSTITUTE : AUDIENCE_SCOPES.GLOBAL,
+                defaultInstituteId: instituteId,
+            });
+            resolvedAudience = validateAudience(normalized, { requireInstituteId: false });
+            if (!instituteId) {
+                resolvedAudience.scope = AUDIENCE_SCOPES.GLOBAL;
+                resolvedAudience.instituteId = null;
+            }
+        } else {
+            resolvedAudience = {
+                scope: instituteId ? AUDIENCE_SCOPES.INSTITUTE : AUDIENCE_SCOPES.GLOBAL,
+                instituteId: instituteId || null,
+                batchIds: [],
+                studentIds: [],
+            };
+        }
+
+        const isGlobal = resolvedAudience.scope === AUDIENCE_SCOPES.GLOBAL;
+        const resolvedInstituteId = isGlobal ? null : (resolvedAudience.instituteId || instituteId || null);
+
         // ── Build modules array for Course ────────────────────────────
         const mongoose = (await import('mongoose')).default;
 
@@ -6490,25 +6520,20 @@ Rules:
             description: parsed.description || '',
             categoryId,
             tutorId: tutor._id,
-            instituteId,
+            instituteId: resolvedInstituteId,
             createdBy: req.user._id,
             price: Number(price) || 0,
             isFree: Number(price) === 0,
             level: levelMap[difficulty] || 'beginner',
-            language: 'English',
+            language: language || 'English',
             duration: 0,
             whatYouWillLearn: (parsed.whatYouWillLearn || []).slice(0, 6),
             requirements: (parsed.requirements || []).slice(0, 4),
             modules: modulesWithIds,
             status: 'published',
             isAIGenerated: true,
-            visibility: instituteId ? 'institute' : 'public',
-            audience: {
-                scope: instituteId ? 'institute' : 'global',
-                instituteId: instituteId || null,
-                batchIds: [],
-                studentIds: [],
-            },
+            visibility: isGlobal ? 'public' : 'institute',
+            audience: resolvedAudience,
         });
 
         // ── Create Lessons for each module ────────────────────────────

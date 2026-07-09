@@ -392,9 +392,16 @@ export const getCurrentTutor = async (req, res) => {
     const Course = (await import('../models/Course.js')).default;
     const courseCount = await Course.countDocuments({ tutorId: tutor._id });
 
-    // Return tutor object converted to object + courseCount
+    // Get real students count (unique learners)
+    const Enrollment = (await import('../models/Enrollment.js')).default;
+    const courseIds = await Course.find({ tutorId: tutor._id }).distinct('_id');
+    const uniqueStudents = await Enrollment.distinct('studentId', { courseId: { $in: courseIds }, status: 'active' });
+    const studentsCount = uniqueStudents.length;
+
+    // Return tutor object converted to object + courseCount + studentsCount
     const tutorObj = tutor.toObject();
     tutorObj.courseCount = courseCount;
+    tutorObj.studentsCount = studentsCount;
 
     res.status(200).json({
       success: true,
