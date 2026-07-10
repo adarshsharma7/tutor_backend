@@ -27,7 +27,9 @@ const notificationSchema = new mongoose.Schema({
       'assignment_graded',
       'fee_paid',
       'subscription_upgraded',
-      'subscription_expired'
+      'subscription_expired',
+      'exam_reevaluation_approved',
+      'exam_reevaluation_rejected'
     ],
     required: true
   },
