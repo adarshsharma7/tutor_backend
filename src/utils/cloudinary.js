@@ -1,36 +1,14 @@
-import { v2 as cloudinary } from 'cloudinary';
-import multerStorageCloudinary from 'multer-storage-cloudinary';
-import multer from 'multer';
-import dotenv from 'dotenv';
+/**
+ * Backwards compatibility adapter for file uploads.
+ * Replaces Cloudinary storage with local VPS disk storage.
+ */
+import { imageUpload, documentUpload, getFilePublicUrl } from './localUpload.js';
 
-dotenv.config();
+// Default export is imageUpload (formerly Cloudinary profile upload)
+const upload = imageUpload;
 
-cloudinary.config({
-  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
-  api_key: process.env.CLOUDINARY_API_KEY,
-  api_secret: process.env.CLOUDINARY_API_SECRET,
-});
+// Named export for general files (formerly Cloudinary resource upload)
+export const fileUpload = documentUpload;
 
-const storage = multerStorageCloudinary({
-  cloudinary: { v2: cloudinary },
-  params: {
-    folder: 'tutor-app-profiles',
-    allowed_formats: ['jpg', 'png', 'jpeg', 'webp'],
-    transformation: [{ width: 500, height: 500, crop: 'limit' }],
-  },
-});
-
-const fileStorage = multerStorageCloudinary({
-  cloudinary: { v2: cloudinary },
-  params: {
-    folder: 'tutor-app-resources',
-    resource_type: 'auto', // Important for PDFs, Docs, etc.
-    // allowed_formats: ['pdf', 'doc', 'docx', 'zip', 'ppt', 'pptx'], // Optional: Restrict types if needed
-  },
-});
-
-const upload = multer({ storage: storage });
-const fileUpload = multer({ storage: fileStorage });
-
-export { fileUpload };
+export { getFilePublicUrl };
 export default upload;

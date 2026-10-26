@@ -21,33 +21,80 @@ export const processVideoForHLS = (inputPath, outputBaseDir, fileId) => {
         }
 
         const outputPath = path.join(hlsDir, 'index.m3u8');
+        console.log(`Starting FFMPEG HLS processing for: ${fileId}`);
 
-        console.log(`Starting FFMPEG transcoding for: ${fileId}`);
+        // Try fast stream copy first (-c copy) for near-instant chunking (2-4 seconds)
+        const runStreamCopy = () => {
+            ffmpeg(inputPath, { timeout: 432000 })
+                .outputOptions([
+                    '-c copy',
+                    '-start_number 0',
+                    '-hls_time 6',      // 6-second segments for instant scrubbing
+                    '-hls_list_size 0',  // Keep all segments in playlist (VOD)
+                    '-f hls'
+                ])
+                .output(outputPath)
+                .on('end', () => {
+                    console.log(`HLS stream-copy successfully finished for: ${fileId}`);
+                    // Clean up raw temp file to save VPS disk space
+                    try {
+                        if (fs.existsSync(inputPath)) fs.unlinkSync(inputPath);
+                    } catch (e) {
+                        console.error('Failed to clean up raw input file:', e);
+                    }
+                    resolve({
+                        success: true,
+                        playlistUrl: `/uploads/hls/${fileId}/index.m3u8`,
+                        hlsDir
+                    });
+                })
+                .on('error', (err) => {
+                    console.warn(`HLS stream-copy failed (${err.message}). Retrying with high-compatibility transcode...`);
+                    runTranscodeFallback();
+                })
+                .run();
+        };
 
-        ffmpeg(inputPath, { timeout: 432000 }) // Long timeout for large files
-            .addOptions([
-                '-profile:v baseline', // Compatible profile
-                '-level 3.0',
-                '-start_number 0',     // Segment index
-                '-hls_time 10',        // 10-second segments
-                '-hls_list_size 0',    // Keep all segments in the playlist (VOD)
-                '-f hls'               // Explicitly declare HLS format
-            ])
-            .output(outputPath)
-            .on('end', () => {
-                console.log(`HLS processing successfully finished for: ${fileId}`);
-                resolve({
-                    success: true,
-                    // The frontend will request this path from the static server
-                    playlistUrl: `/uploads/hls/${fileId}/index.m3u8`,
-                    hlsDir
-                });
-            })
-            .on('error', (err, stdout, stderr) => {
-                console.error(`FFMPEG Error processing ${fileId}:`, err.message);
-                console.error(`STDERR:`, stderr);
-                reject(err);
-            })
-            .run();
+        // Fallback for non-standard codecs: re-encode to high compatibility H.264
+        const runTranscodeFallback = () => {
+            ffmpeg(inputPath, { timeout: 432000 })
+                .outputOptions([
+                    '-c:v libx264',
+                    '-preset veryfast',
+                    '-crf 22',
+                    '-profile:v main',
+                    '-level 3.1',
+                    '-c:a aac',
+                    '-b:a 128k',
+                    '-start_number 0',
+                    '-hls_time 6',
+                    '-hls_list_size 0',
+                    '-f hls'
+                ])
+                .output(outputPath)
+                .on('end', () => {
+                    console.log(`HLS transcode successfully finished for: ${fileId}`);
+                    try {
+                        if (fs.existsSync(inputPath)) fs.unlinkSync(inputPath);
+                    } catch (e) {
+                        console.error('Failed to clean up raw input file:', e);
+                    }
+                    resolve({
+                        success: true,
+                        playlistUrl: `/uploads/hls/${fileId}/index.m3u8`,
+                        hlsDir
+                    });
+                })
+                .on('error', (err) => {
+                    console.error(`FFMPEG Error processing ${fileId}:`, err.message);
+                    try {
+                        if (fs.existsSync(inputPath)) fs.unlinkSync(inputPath);
+                    } catch (_) {}
+                    reject(err);
+                })
+                .run();
+        };
+
+        runStreamCopy();
     });
 };

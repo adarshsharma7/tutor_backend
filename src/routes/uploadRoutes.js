@@ -1,50 +1,82 @@
-
 import express from 'express';
-import { v2 as cloudinary } from 'cloudinary';
-import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
 import { v4 as uuidv4 } from 'uuid';
-import upload from '../utils/cloudinary.js';
+import axios from 'axios';
 import { protect, authorize } from '../middleware/auth.js';
 import { processVideoForHLS } from '../services/hlsService.js';
 import { requireFeature } from '../middleware/subscriptionMiddleware.js';
-import axios from 'axios';
 import Lesson from '../models/Lesson.js';
 import { getForUser as getEntitlementsForUser } from '../services/entitlementService.js';
 import { evaluateAccess } from '../services/accessPolicy.js';
 import { toStringId } from '../utils/audience.js';
+import {
+  imageUpload,
+  documentUpload,
+  standardVideoUpload,
+  rawVideoUpload,
+  getFilePublicUrl,
+  DIRS
+} from '../utils/localUpload.js';
 
 const router = express.Router();
 
-// Ensure local directories exist for video uploads
-const localUploadsDir = path.join(process.cwd(), 'public', 'uploads', 'raw_videos');
-const hlsOutputDir = path.join(process.cwd(), 'public', 'uploads', 'hls');
+// Flexible multer field handlers to prevent "Unexpected field" errors
+const handleImageUpload = (req, res, next) => {
+  imageUpload.fields([
+    { name: 'image', maxCount: 1 },
+    { name: 'file', maxCount: 1 },
+    { name: 'thumbnail', maxCount: 1 },
+    { name: 'avatar', maxCount: 1 },
+  ])(req, res, (err) => {
+    if (err) return res.status(400).json({ success: false, message: err.message });
+    req.file = req.files?.image?.[0]
+      || req.files?.file?.[0]
+      || req.files?.thumbnail?.[0]
+      || req.files?.avatar?.[0]
+      || null;
+    next();
+  });
+};
 
-if (!fs.existsSync(localUploadsDir)) fs.mkdirSync(localUploadsDir, { recursive: true });
-if (!fs.existsSync(hlsOutputDir)) fs.mkdirSync(hlsOutputDir, { recursive: true });
+const handleDocumentUpload = (req, res, next) => {
+  documentUpload.fields([
+    { name: 'file', maxCount: 1 },
+    { name: 'document', maxCount: 1 },
+    { name: 'attachment', maxCount: 1 },
+    { name: 'image', maxCount: 1 },
+  ])(req, res, (err) => {
+    if (err) return res.status(400).json({ success: false, message: err.message });
+    req.file = req.files?.file?.[0]
+      || req.files?.document?.[0]
+      || req.files?.attachment?.[0]
+      || req.files?.image?.[0]
+      || null;
+    next();
+  });
+};
 
-// Multer storage for raw videos
-const localVideoStorage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    cb(null, localUploadsDir);
-  },
-  filename: (req, file, cb) => {
-    const uniqueId = uuidv4();
-    cb(null, `${uniqueId}${path.extname(file.originalname)}`);
-  }
-});
-const MAX_VIDEO_UPLOAD_MB = Number(process.env.MAX_VIDEO_UPLOAD_MB || 500);
-const localVideoUpload = multer({
-  storage: localVideoStorage,
-  limits: { fileSize: MAX_VIDEO_UPLOAD_MB * 1024 * 1024 },
-  fileFilter: (req, file, cb) => {
-    if (!file?.mimetype?.startsWith('video/')) {
-      return cb(new Error('Only video files are allowed'));
-    }
-    return cb(null, true);
-  },
-});
+const handleStandardVideoUpload = (req, res, next) => {
+  standardVideoUpload.fields([
+    { name: 'video', maxCount: 1 },
+    { name: 'file', maxCount: 1 },
+  ])(req, res, (err) => {
+    if (err) return res.status(400).json({ success: false, message: err.message });
+    req.file = req.files?.video?.[0] || req.files?.file?.[0] || null;
+    next();
+  });
+};
+
+const handleRawVideoUpload = (req, res, next) => {
+  rawVideoUpload.fields([
+    { name: 'video', maxCount: 1 },
+    { name: 'file', maxCount: 1 },
+  ])(req, res, (err) => {
+    if (err) return res.status(400).json({ success: false, message: err.message });
+    req.file = req.files?.video?.[0] || req.files?.file?.[0] || null;
+    next();
+  });
+};
 
 const escapeRegex = (value = '') => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
@@ -158,150 +190,180 @@ const authorizeLessonHlsAccess = async (req, pathSuffix) => {
   return { allowed: true, lesson };
 };
 
+// ============================================================================
 // @route   POST /api/upload/image
-// @desc    Upload an image
-// @access  Private (Tutor/Admin)
-router.post('/image', protect, authorize('tutor', 'admin', 'student'), upload.single('image'), (req, res) => {
-  if (!req.file) {
-    return res.status(400).json({ success: false, message: 'No file uploaded' });
+// @desc    Upload an image (Avatar, Thumbnail, Banner, etc.) directly to VPS
+// @access  Private (Student, Tutor, Admin, Superadmin)
+// ============================================================================
+router.post(
+  '/image',
+  protect,
+  authorize('tutor', 'admin', 'student', 'superadmin'),
+  handleImageUpload,
+  (req, res) => {
+    if (!req.file) {
+      return res.status(400).json({ success: false, message: 'No image file uploaded' });
+    }
+
+    const relativeUrl = `/uploads/images/${req.file.filename}`;
+    const fullUrl = getFilePublicUrl(req, relativeUrl);
+
+    res.status(200).json({
+      success: true,
+      imageUrl: fullUrl,
+      url: fullUrl,
+      fileUrl: fullUrl,
+      relativeUrl,
+      filename: req.file.filename,
+      size: req.file.size,
+      mimetype: req.file.mimetype,
+      cloudinaryId: req.file.filename, // backward compatibility
+    });
   }
+);
 
-  const imageUrl = String(req.file.path || '').replace(/^http:\/\//i, 'https://');
-
-  res.json({
-    success: true,
-    imageUrl,
-    url: imageUrl,
-    cloudinaryId: req.file.filename,
-  });
-});
-
+// ============================================================================
 // @route   POST /api/upload/file
-// @desc    Upload a document/file
-// @access  Private (Tutor/Admin)
-import { fileUpload } from '../utils/cloudinary.js';
+// @desc    Upload a document/file (PDF, Word, Excel, Notes, Assignments) to VPS
+// @access  Private (Student, Tutor, Admin, Superadmin)
+// ============================================================================
+router.post(
+  '/file',
+  protect,
+  authorize('tutor', 'admin', 'student', 'superadmin'),
+  handleDocumentUpload,
+  (req, res) => {
+    if (!req.file) {
+      return res.status(400).json({ success: false, message: 'No file uploaded' });
+    }
 
-router.post('/file', protect, authorize('tutor', 'admin', 'student'), fileUpload.single('file'), (req, res) => {
-  if (!req.file) {
-    return res.status(400).json({ success: false, message: 'No file uploaded' });
+    const relativeUrl = `/uploads/files/${req.file.filename}`;
+    const fullUrl = getFilePublicUrl(req, relativeUrl);
+
+    res.status(200).json({
+      success: true,
+      fileUrl: fullUrl,
+      url: fullUrl,
+      imageUrl: fullUrl,
+      relativeUrl,
+      name: req.file.originalname,
+      filename: req.file.filename,
+      type: req.file.mimetype,
+      size: req.file.size,
+      cloudinaryId: req.file.filename, // backward compatibility
+    });
   }
+);
 
-  const fileUrl = String(req.file.path || '').replace(/^http:\/\//i, 'https://');
+// ============================================================================
+// @route   POST /api/upload/video
+// @desc    Standard video upload (Direct MP4/WebM storage on VPS)
+// @access  Private (Tutor, Admin, Superadmin)
+// ============================================================================
+router.post(
+  '/video',
+  protect,
+  authorize('tutor', 'admin', 'superadmin'),
+  handleStandardVideoUpload,
+  (req, res) => {
+    if (!req.file) {
+      return res.status(400).json({ success: false, message: 'No video file provided' });
+    }
 
-  res.json({
-    success: true,
-    fileUrl,
-    url: fileUrl,
-    name: req.file.originalname,
-    type: req.file.mimetype,
-    cloudinaryId: req.file.filename,
-  });
-});
+    const relativeUrl = `/uploads/videos/${req.file.filename}`;
+    const fullUrl = getFilePublicUrl(req, relativeUrl);
 
+    res.status(200).json({
+      success: true,
+      message: 'Video uploaded successfully to VPS',
+      videoUrl: fullUrl,
+      url: fullUrl,
+      fileUrl: fullUrl,
+      relativeUrl,
+      filename: req.file.filename,
+      size: req.file.size,
+      duration: Number(req.body.duration || 0),
+      status: 'ready',
+    });
+  }
+);
+
+// ============================================================================
+// @route   POST /api/upload/video-hls
+// @desc    Upload raw video, convert to HLS (.m3u8 + 6s .ts chunks) on VPS
+// @access  Private (Tutor/Admin/Superadmin with HLS Subscription)
+// ============================================================================
+router.post(
+  '/video-hls',
+  protect,
+  authorize('tutor', 'admin', 'superadmin'),
+  requireFeature('hlsStreaming'), // SECURE: Only subscribed tenants can use HLS
+  handleRawVideoUpload,
+  async (req, res) => {
+    if (!req.file) {
+      return res.status(400).json({ success: false, message: 'No video file provided' });
+    }
+
+    const videoId = uuidv4();
+
+    try {
+      // Run industry-standard FFMPEG HLS segmentation on VPS
+      const hlsResult = await processVideoForHLS(req.file.path, DIRS.hls, videoId);
+
+      const relativeUrl = hlsResult.playlistUrl; // /uploads/hls/<videoId>/index.m3u8
+      const fullUrl = getFilePublicUrl(req, relativeUrl);
+
+      res.status(200).json({
+        success: true,
+        message: 'Video converted to secure HLS streaming on VPS',
+        estimatedPlaylistUrl: fullUrl,
+        playlistUrl: fullUrl,
+        videoUrl: fullUrl,
+        url: fullUrl,
+        relativeUrl,
+        videoId,
+        duration: Number(req.body.duration || 0),
+        videoSize: req.file.size,
+        status: 'ready',
+      });
+    } catch (error) {
+      console.error('HLS Conversion Error on VPS:', error);
+      // Clean up raw temp file if still present
+      try {
+        if (req.file && fs.existsSync(req.file.path)) {
+          fs.unlinkSync(req.file.path);
+        }
+      } catch (_) {}
+      res.status(500).json({ success: false, message: 'Server error during HLS video processing' });
+    }
+  }
+);
+
+// ============================================================================
 // @route   POST /api/upload/cloudinary-signature
-// @desc    Get signed signature for direct Cloudinary upload
-// @access  Private (Tutor/Admin/Student)
+// @desc    Legacy fallback signature route (Directs clients to VPS endpoints)
+// @access  Private
+// ============================================================================
 router.post('/cloudinary-signature', protect, (req, res, next) => {
   if (req.body?.type === 'hls') {
     return requireFeature('hlsStreaming')(req, res, next);
   }
   next();
 }, (req, res) => {
-  try {
-    const { type } = req.body || {};
-    const timestamp = Math.round((new Date()).getTime() / 1000);
-
-    const isHls = type === 'hls';
-    const folder = isHls ? 'tutor-app-hls' : 'tutor-app-resources';
-
-    const params_to_sign = {
-      timestamp: timestamp,
-      folder: folder,
-    };
-
-    if (isHls) {
-      params_to_sign.eager = 'sp_auto/m3u8';
-      params_to_sign.eager_async = 'true';
-    }
-
-    const signature = cloudinary.utils.api_sign_request(params_to_sign, process.env.CLOUDINARY_API_SECRET);
-
-    res.json({
-      success: true,
-      signature,
-      timestamp,
-      cloudName: process.env.CLOUDINARY_CLOUD_NAME,
-      apiKey: process.env.CLOUDINARY_API_KEY,
-      folder,
-      ...(isHls ? { eager: 'sp_auto/m3u8', eager_async: 'true' } : {})
-    });
-  } catch (error) {
-    console.error('Error generating signature:', error);
-    res.status(500).json({ success: false, message: 'Failed to generate upload signature' });
-  }
+  const isHls = req.body?.type === 'hls';
+  res.json({
+    success: true,
+    isLocal: true,
+    uploadEndpoint: isHls ? '/api/upload/video-hls' : '/api/upload/video',
+    message: 'VPS local upload active',
+  });
 });
 
-// @route   POST /api/upload/video-hls
-// @desc    Upload an MP4 and convert to HLS format
-// @access  Private (Tutor)
-router.post(
-  '/video-hls',
-  protect,
-  authorize('tutor'),
-  requireFeature('hlsStreaming'), // SECURE: Only tenants with HLS plan can use this
-  localVideoUpload.single('video'),
-  async (req, res) => {
-
-    if (!req.file) {
-      return res.status(400).json({ success: false, message: 'No video file provided' });
-    }
-
-    try {
-      // Upload raw video to Cloudinary and request background HLS transcoding
-      const result = await cloudinary.uploader.upload(req.file.path, {
-        resource_type: 'video',
-        folder: 'tutor-app-hls',
-        eager: [
-          { streaming_profile: 'auto', format: 'm3u8' }
-        ],
-        eager_async: true
-      });
-
-      // Clean up the local temp MP4 file immediately to save VPS disk space
-      try {
-        fs.unlinkSync(req.file.path);
-        console.log('Cleaned up raw local video file:', req.file.path);
-      } catch (cleanupErr) {
-        console.error('Failed to clean up raw local video file:', cleanupErr);
-      }
-
-      const cloudName = cloudinary.config().cloud_name || process.env.CLOUDINARY_CLOUD_NAME;
-      const estimatedPlaylistUrl = `https://res.cloudinary.com/${cloudName}/video/upload/sp_auto/${result.public_id}.m3u8`;
-
-      res.status(200).json({
-        success: true,
-        message: 'Video uploaded and is being processed for HLS streaming on Cloudinary.',
-        estimatedPlaylistUrl,
-        duration: Math.round(result.duration || 0),
-        videoSize: result.bytes || req.file.size || 0,
-        status: 'processing'
-      });
-
-    } catch (error) {
-      console.error('Upload Video Error:', error);
-      // Clean up local file in case upload failed
-      try {
-        if (req.file && fs.existsSync(req.file.path)) {
-          fs.unlinkSync(req.file.path);
-        }
-      } catch (_) { }
-      res.status(500).json({ success: false, message: 'Server error during upload' });
-    }
-  });
-
+// ============================================================================
 // @route   GET /api/upload/secure-hls/*cloudinaryPath
-// @desc    Token-gated secure HLS streaming proxy for Cloudinary
+// @desc    Legacy proxy for previously stored Cloudinary HLS assets
 // @access  Private (Authenticated Students/Tutors/Admins)
+// ============================================================================
 router.get(/^\/secure-hls\/(.*)/, protect, async (req, res) => {
   let pathSuffix = req.params[0];
 
@@ -323,14 +385,13 @@ router.get(/^\/secure-hls\/(.*)/, protect, async (req, res) => {
   if (!accessDecision.allowed) {
     return res.status(accessDecision.status || 403).json({
       success: false,
-      message: accessDecision.message || 'Not authorized to stream this video'
+      message: accessDecision.message || 'Not authorized to stream this video',
     });
   }
 
   const cloudinaryUrl = `https://res.cloudinary.com/${pathSuffix}`;
   const isManifest = pathSuffix.endsWith('.m3u8');
 
-  // Forward Range header if present
   const headers = {};
   if (req.headers.range) {
     headers.range = req.headers.range;
@@ -338,36 +399,33 @@ router.get(/^\/secure-hls\/(.*)/, protect, async (req, res) => {
 
   try {
     if (isManifest) {
-      // Fetch the manifest as text
       const response = await axios.get(cloudinaryUrl, {
         headers,
-        responseType: 'text'
+        responseType: 'text',
       });
 
-      const token = req.query.token || req.cookies?.token || (req.headers.authorization ? req.headers.authorization.split(' ')[1] : null);
+      const token = req.query.token
+        || req.cookies?.token
+        || (req.headers.authorization ? req.headers.authorization.split(' ')[1] : null);
       const isCookieAuth = !req.query.token && req.cookies?.token;
       let manifestText = response.data;
 
-      // Rewrite absolute and root-relative Cloudinary URLs, and append token to all playlist/segment files
       const lines = manifestText.split(/\r?\n/);
-      const rewrittenLines = lines.map(line => {
+      const rewrittenLines = lines.map((line) => {
         const trimmed = line.trim();
-        // If line is empty or is a comment/tag, leave it as is
         if (!trimmed || trimmed.startsWith('#')) {
           return line;
         }
 
-        // It is a URI line (either a variant playlist or a segment file)
         let rewrittenUri = trimmed;
-
-        // Check if the URI is a Cloudinary path and rewrite to our proxy path
-        const cloudinaryMatch = rewrittenUri.match(/(?:https:\/\/res\.cloudinary\.com)?\/([a-zA-Z0-9_-]+)\/video\/upload\/([^\s?]+)/);
+        const cloudinaryMatch = rewrittenUri.match(
+          /(?:https:\/\/res\.cloudinary\.com)?\/([a-zA-Z0-9_-]+)\/video\/upload\/([^\s?]+)/
+        );
         if (cloudinaryMatch) {
           const [_, cloudName, rest] = cloudinaryMatch;
           rewrittenUri = `/api/proxy/upload/secure-hls/${cloudName}/video/upload/${rest}`;
         }
 
-        // Append JWT authentication token if present (skip if using cookie auth to prevent URL exposure)
         if (token && !isCookieAuth) {
           const separator = rewrittenUri.includes('?') ? '&' : '?';
           if (!rewrittenUri.includes('token=')) {
@@ -384,29 +442,18 @@ router.get(/^\/secure-hls\/(.*)/, protect, async (req, res) => {
       });
 
       manifestText = rewrittenLines.join('\n');
-
       res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
       return res.send(manifestText);
     } else {
-      // Stream segment byte ranges from Cloudinary
       const response = await axios.get(cloudinaryUrl, {
         headers,
-        responseType: 'stream'
+        responseType: 'stream',
       });
 
-      // Pass crucial headers to the client
-      if (response.headers['content-type']) {
-        res.setHeader('content-type', response.headers['content-type']);
-      }
-      if (response.headers['content-length']) {
-        res.setHeader('content-length', response.headers['content-length']);
-      }
-      if (response.headers['accept-ranges']) {
-        res.setHeader('accept-ranges', response.headers['accept-ranges']);
-      }
-      if (response.headers['content-range']) {
-        res.setHeader('content-range', response.headers['content-range']);
-      }
+      if (response.headers['content-type']) res.setHeader('content-type', response.headers['content-type']);
+      if (response.headers['content-length']) res.setHeader('content-length', response.headers['content-length']);
+      if (response.headers['accept-ranges']) res.setHeader('accept-ranges', response.headers['accept-ranges']);
+      if (response.headers['content-range']) res.setHeader('content-range', response.headers['content-range']);
 
       res.status(response.status);
       response.data.pipe(res);
